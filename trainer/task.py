@@ -12,66 +12,105 @@ from sklearn.neighbors import KNeighborsClassifier
 from trainer.model import HierarchicalFilmEmbedding, MultiDimensionTripletLoss
 from trainer.dataset import MultiTaskFilmDataset, create_evaluation_pairs_for_dimension
 
-def create_hierarchical_model(base_model="bert-base-uncased", embedding_dim=256):
-    model = HierarchicalFilmEmbedding(base_model, embedding_dim)
-    
-    # Create a sentence transformer wrapper
+def create_hierarchical_model(base_model="bert-base-uncased", embedding_dim=256, device=None):
+    # Create transformer + pooling that produce pooled sentence embeddings
     word_embedding_model = models.Transformer(base_model, max_seq_length=512)
     pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension(), pooling_mode='mean')
-    
-    # This is a base ST model that we'll replace the forward method on
+
+    input_dim = pooling_model.get_sentence_embedding_dimension()
+
+    # Projection heads (trainable)
+    hier_proj = HierarchicalFilmEmbedding(input_dim=input_dim, embedding_dim=embedding_dim)
+
+    # Base SentenceTransformer for tokenization + pooling (we won't fine-tune transformer by default)
     st_model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
-    
-    # Replace the encode method to use our hierarchical model
+
+    # Register the projection module so it's part of the nn.Module tree
+    st_model.add_module('hier_proj', hier_proj)
+
+    # Keep original encode that returns pooled embeddings
     original_encode = st_model.encode
-    
-    def hierarchical_encode(sentences, *args, **kwargs):
-        # Keep the original encode functionality for tokenization
-        features = original_encode(sentences, *args, convert_to_tensor=True, **kwargs)
-        # Apply our hierarchical model
-        return model(features)
-    
+
+    def hierarchical_encode(sentences, convert_to_tensor=True, batch_size=32, **kwargs):
+        # Get pooled embeddings from the underlying transformer+pooling
+        pooled = original_encode(sentences, convert_to_tensor=True, batch_size=batch_size, **kwargs)
+
+        # Ensure tensor on correct device
+        if device is not None:
+            pooled = pooled.to(device)
+
+        # Apply projection heads -> dict of tensors (batch, emb_dim)
+        out = st_model.hier_proj(pooled)
+
+        # Convert to list of per-sample dicts for downstream loss/eval
+        batch_size_actual = out['joint'].size(0)
+        results = []
+        for i in range(batch_size_actual):
+            entry = {k: out[k][i] for k in out}
+            results.append(entry)
+
+        return results
+
     st_model.encode = hierarchical_encode
-    
+
     return st_model
 
-def train_hierarchical_model(train_dataset, val_dataset, model, output_path, epochs=10):
-    # Define our custom loss
-    train_loss = MultiDimensionTripletLoss(model=model, margin=0.5)
-    
-    # Create DataLoader
-    train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=32)
-    
-    # Create evaluators for each dimension
-    evaluators = {}
-    dimensions = ['genre', 'theme', 'era', 'director', 'joint']
-    
-    for dim in dimensions:
-        # Create evaluation pairs for this dimension
-        eval_examples = create_evaluation_pairs_for_dimension(val_dataset, dim)
-        
-        evaluators[dim] = evaluation.EmbeddingSimilarityEvaluator.from_input_examples(
-            eval_examples,
-            name=f'{dim}-validation',
-            batch_size=32
-        )
-    
-    # Train with multiple evaluators
-    model.fit(
-        train_objectives=[(train_dataloader, train_loss)],
-        epochs=epochs,
-        evaluator=evaluators,
-        evaluation_steps=1000,
-        warmup_steps=100,
-        output_path=output_path
-    )
-    
-    return model
+def train_hierarchical_model(train_dataset, val_dataset, st_model, output_path, epochs=10, batch_size=32, lr=2e-5, device=None):
+    # Simple PyTorch training loop that updates the projection heads registered
+    # on the SentenceTransformer `st_model` (module name: 'hier_proj').
+
+    device = device or (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
+
+    train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size)
+    val_dataloader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size)
+
+    # Loss wrapper uses st_model.encode to obtain per-sample dicts
+    train_loss_fn = MultiDimensionTripletLoss(st_model, margin=0.5, device=device)
+
+    # Only optimize the projection heads by default
+    params = list(st_model.hier_proj.parameters())
+    optimizer = torch.optim.Adam(params, lr=lr)
+
+    st_model.to(device)
+    st_model.hier_proj.to(device)
+
+    for epoch in range(epochs):
+        st_model.train()
+        total_loss = 0.0
+        steps = 0
+
+        for batch in train_dataloader:
+            optimizer.zero_grad()
+            loss_val = train_loss_fn(batch)
+            loss_val.backward()
+            optimizer.step()
+
+            total_loss += loss_val.item()
+            steps += 1
+
+        avg_loss = total_loss / max(1, steps)
+        print(f"Epoch {epoch+1}/{epochs} — train loss: {avg_loss:.4f}")
+
+        # Optional simple validation: compute average loss on a small subset
+        st_model.eval()
+        with torch.no_grad():
+            val_loss = 0.0
+            vsteps = 0
+            for vb in val_dataloader:
+                l = train_loss_fn(vb)
+                val_loss += l.item()
+                vsteps += 1
+                if vsteps >= 20:
+                    break
+            if vsteps > 0:
+                print(f"  Validation loss (sampled): {val_loss / vsteps:.4f}")
+
+    return st_model
 
 def extract_dimension_embeddings(model, texts, dimension):
     """Extract embeddings for a specific dimension"""
-    all_embeddings = model.encode(texts, batch_size=32)
-    # Extract only the embeddings for the requested dimension
+    all_embeddings = model.encode(texts, batch_size=32, convert_to_tensor=True)
+    # all_embeddings is a list of dicts; extract requested dimension
     dimension_embeddings = np.array([emb[dimension].cpu().numpy() for emb in all_embeddings])
     return dimension_embeddings
 
@@ -111,7 +150,7 @@ def main(args):
     
     # Create hierarchical model
     print("Creating model...")
-    model = create_hierarchical_model(args.base_model, args.embedding_dim)
+    model = create_hierarchical_model(args.base_model, args.embedding_dim, device=device)
     
     # Create output directory
     os.makedirs(args.model_dir, exist_ok=True)
@@ -119,11 +158,12 @@ def main(args):
     # Train model
     print("Training model...")
     model = train_hierarchical_model(
-        train_dataset, 
-        val_dataset, 
-        model, 
+        train_dataset,
+        val_dataset,
+        model,
         output_path=args.model_dir,
-        epochs=args.epochs
+        epochs=args.epochs,
+        device=device
     )
     
     # Create specialized KNN classifiers for each dimension
