@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from sentence_transformers import SentenceTransformer, models, evaluation
 from sklearn.neighbors import KNeighborsClassifier
 
-# Import our modules
+# Import modules
 from trainer.model import HierarchicalFilmEmbedding, MultiDimensionTripletLoss
 from trainer.dataset import MultiTaskFilmDataset, create_evaluation_pairs_for_dimension
 
@@ -19,27 +19,26 @@ def create_hierarchical_model(base_model="bert-base-uncased", embedding_dim=256,
 
     input_dim = pooling_model.get_sentence_embedding_dimension()
 
-    # Projection heads (trainable)
+    # Projection heads 
     hier_proj = HierarchicalFilmEmbedding(input_dim=input_dim, embedding_dim=embedding_dim)
 
-    # Base SentenceTransformer for tokenization + pooling (we won't fine-tune transformer by default)
+    # Base SentenceTransformer for tokenization + pooling 
     st_model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
 
-    # Register the projection module so it's part of the nn.Module tree
+    # Register the projection module 
     st_model.add_module('hier_proj', hier_proj)
 
-    # Keep original encode that returns pooled embeddings
+    # original encode that returns pooled embeddings
     original_encode = st_model.encode
 
     def hierarchical_encode(sentences, convert_to_tensor=True, batch_size=32, **kwargs):
-        # Get pooled embeddings from the underlying transformer+pooling
+        # Get pooled embeddings from the base transformer+pooling
         pooled = original_encode(sentences, convert_to_tensor=True, batch_size=batch_size, **kwargs)
 
-        # Ensure tensor on correct device
         if device is not None:
             pooled = pooled.to(device)
 
-        # Apply projection heads -> dict of tensors (batch, emb_dim)
+        # Apply projection heads 
         out = st_model.hier_proj(pooled)
 
         # Convert to list of per-sample dicts for downstream loss/eval
@@ -57,7 +56,7 @@ def create_hierarchical_model(base_model="bert-base-uncased", embedding_dim=256,
 
 def train_hierarchical_model(train_dataset, val_dataset, st_model, output_path, epochs=10, batch_size=32, lr=2e-5, device=None):
     # Simple PyTorch training loop that updates the projection heads registered
-    # on the SentenceTransformer `st_model` (module name: 'hier_proj').
+    # on the SentenceTransformer st_model.
 
     device = device or (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
 
@@ -91,7 +90,7 @@ def train_hierarchical_model(train_dataset, val_dataset, st_model, output_path, 
         avg_loss = total_loss / max(1, steps)
         print(f"Epoch {epoch+1}/{epochs} — train loss: {avg_loss:.4f}")
 
-        # Optional simple validation: compute average loss on a small subset
+        # compute average loss on a small subset
         st_model.eval()
         with torch.no_grad():
             val_loss = 0.0
@@ -110,7 +109,7 @@ def train_hierarchical_model(train_dataset, val_dataset, st_model, output_path, 
 def extract_dimension_embeddings(model, texts, dimension):
     """Extract embeddings for a specific dimension"""
     all_embeddings = model.encode(texts, batch_size=32, convert_to_tensor=True)
-    # all_embeddings is a list of dicts; extract requested dimension
+    # all_embeddings is a list of dicts
     dimension_embeddings = np.array([emb[dimension].cpu().numpy() for emb in all_embeddings])
     return dimension_embeddings
 
@@ -135,7 +134,7 @@ def load_data(data_path):
     return train_df, val_df, encoders
 
 def main(args):
-    # Set device
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -167,7 +166,7 @@ def main(args):
     )
     
     # Create specialized KNN classifiers for each dimension
-    print("Creating classifiers...")
+    print("Creating classifiers")
     classifiers = {}
     dimensions = ['genre', 'theme', 'era', 'director']
     
@@ -183,15 +182,12 @@ def main(args):
         knn.fit(train_embeddings, train_labels)
         classifiers[dim] = knn
     
-    # Save everything
-    print("Saving models and classifiers...")
+    print("Saving models and classifiers")
     
-    # Save each classifier
     for dim, classifier in classifiers.items():
         with open(os.path.join(args.model_dir, f"{dim}_classifier.pkl"), "wb") as f:
             pickle.dump(classifier, f)
     
-    # Save each encoder
     for dim, encoder in encoders.items():
         with open(os.path.join(args.model_dir, f"{dim}_encoder.pkl"), "wb") as f:
             pickle.dump(encoder, f)
@@ -212,4 +208,5 @@ if __name__ == "__main__":
                         help="Directory to save model artifacts")
     
     args = parser.parse_args()
+
     main(args)
