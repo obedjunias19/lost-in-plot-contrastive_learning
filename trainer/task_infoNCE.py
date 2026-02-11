@@ -15,20 +15,6 @@ from trainer.dataset import FilmPairDataset
 
 def create_film_model(base_model="bert-base-uncased", embedding_dim=300, device=None, 
                       num_genres=None, num_decades=None, num_themes=None):
-    """
-    Create dense retrieval model with auxiliary classification heads.
-    
-    Args:
-        base_model: HuggingFace model ID for BERT
-        embedding_dim: Dimension of retrieval embeddings
-        device: torch device
-        num_genres: Number of genre classes
-        num_decades: Number of decade classes
-        num_themes: Number of theme classes
-    
-    Returns:
-        st_model: SentenceTransformer with attached FilmRetrievalModel
-    """
     # BERT + pooling pipeline
     word_embedding_model = models.Transformer(base_model, max_seq_length=512)
     pooling_model = models.Pooling(
@@ -80,20 +66,7 @@ def create_film_model(base_model="bert-base-uncased", embedding_dim=300, device=
 def train_film_model(train_dataset, val_dataset, st_model, output_path, 
                      epochs=8, batch_size=16, lr=2e-5, device=None,
                      w_retr=1.0, w_genre=0.1, w_decade=0.1, w_theme=0.1):
-    """
-    Train dense retrieval model with multi-task loss.
-    
-    Args:
-        train_dataset: FilmPairDataset for training
-        val_dataset: FilmPairDataset for validation
-        st_model: SentenceTransformer with FilmRetrievalModel attached
-        output_path: Directory to save model
-        epochs: Number of training epochs
-        batch_size: Batch size
-        lr: Learning rate
-        device: torch device
-        w_retr, w_genre, w_decade, w_theme: Loss weights
-    """
+
     device = device or (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
     
     train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size)
@@ -108,11 +81,11 @@ def train_film_model(train_dataset, val_dataset, st_model, output_path,
         w_theme=w_theme
     ).to(device)
     
-    # Optimizer: only film_model parameters (freeze BERT)
+    # only film_model parameters (freeze BERT)
     params = list(st_model.film_model.parameters())
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
     
-    # Scheduler: cosine annealing with warmup
+    # cosine annealing with warmup
     total_steps = epochs * len(train_loader)
     warmup_steps = int(0.1 * total_steps)
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=0)
@@ -195,7 +168,7 @@ def train_film_model(train_dataset, val_dataset, st_model, output_path,
                 val_loss += loss.item()
                 val_steps += 1
                 
-                if val_steps >= 20:  # Sampled validation
+                if val_steps >= 20: 
                     break
         
         avg_val_loss = val_loss / max(1, val_steps) if val_steps > 0 else float('inf')
@@ -212,18 +185,7 @@ def train_film_model(train_dataset, val_dataset, st_model, output_path,
 
 
 def extract_embeddings(model, texts, batch_size=32, device=None):
-    """
-    Extract normalized retrieval embeddings for texts.
     
-    Args:
-        model: SentenceTransformer with film_encode
-        texts: List of text strings
-        batch_size: Batch size for encoding
-        device: torch device
-    
-    Returns:
-        Numpy array of shape (len(texts), embedding_dim)
-    """
     device = device or (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
     model.eval()
     
@@ -258,13 +220,13 @@ def main(args):
     print(f"Using device: {device}")
     
     # Load data
-    print("Loading data...")
+    print("Loading data")
     train_df, val_df, encoders = load_data(args.data_path)
     
     print(f"Train size: {len(train_df)}, Val size: {len(val_df)}")
     
     # Create datasets
-    print("Creating datasets...")
+    print("Creating datasets")
     train_dataset = FilmPairDataset(train_df, encoders)
     val_dataset = FilmPairDataset(val_df, encoders)
     
@@ -276,7 +238,7 @@ def main(args):
     print(f"Num genres: {num_genres}, decades: {num_decades}, themes: {num_themes}")
     
     # Create model
-    print("Creating model...")
+    print("Creating model")
     model = create_film_model(
         base_model=args.base_model,
         embedding_dim=args.embedding_dim,
@@ -287,7 +249,7 @@ def main(args):
     )
     
     # Train
-    print("Training model...")
+    print("Training model")
     model = train_film_model(
         train_dataset,
         val_dataset,
@@ -303,8 +265,8 @@ def main(args):
         w_theme=args.w_theme
     )
     
-    # Save encoders
-    print("Saving encoders...")
+
+    print("Saving encoders")
     os.makedirs(args.model_dir, exist_ok=True)
     for dim, encoder in encoders.items():
         with open(os.path.join(args.model_dir, f"{dim}_encoder.pkl"), "wb") as f:
