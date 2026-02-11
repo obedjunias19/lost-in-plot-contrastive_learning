@@ -12,13 +12,7 @@ class FilmPairDataset(Dataset):
     Returns pairs suitable for InfoNCE loss with batch negatives.
     """
     def __init__(self, df, encoders, tokenizer=None, max_length=512):
-        """
-        Args:
-            df: DataFrame with columns: combined_text_baseline, genre, theme, era, director
-            encoders: Dict of sklearn LabelEncoders for each dimension
-            tokenizer: Optional tokenizer (not used here, kept for compatibility)
-            max_length: Maximum sequence length (kept for compatibility)
-        """
+
         self.df = df
         self.texts = df["combined_text_baseline"].tolist()
         
@@ -28,18 +22,18 @@ class FilmPairDataset(Dataset):
         self.era_labels = encoders['era'].transform(df["era"])
         self.director_labels = encoders['director'].transform(df["director"])
         
-        # Multi-hot encoding for genres (could be multiple per movie)
+        # Multi-hot encoding for genres 
         self.num_genres = len(encoders['genre'].classes_)
         self.genre_multihot = self._create_multihot_genre(df["genre"])
         
-        # Build index: theme -> list of indices with that theme
+        #  theme -> list of indices with that theme
         unique_themes = np.unique(self.theme_labels)
         self.theme_index = {
             theme: np.where(self.theme_labels == theme)[0].tolist()
             for theme in unique_themes
         }
         
-        # Filter themes with only 1 sample (can't form positive pairs)
+        # Filter themes with only 1 sample
         self.valid_themes = [t for t, indices in self.theme_index.items() if len(indices) >= 2]
     
     def _create_multihot_genre(self, genre_col):
@@ -53,15 +47,6 @@ class FilmPairDataset(Dataset):
         return len(self.df)
     
     def __getitem__(self, idx):
-        """
-        Returns:
-            Dict with:
-            - 'anchor_text': Movie text
-            - 'positive_text': Different movie with same theme
-            - 'genre_labels': Multi-hot genre vector
-            - 'theme_labels': Theme label (single-label)
-            - 'era_labels': Era/decade label
-        """
         anchor_text = self.texts[idx]
         anchor_theme = self.theme_labels[idx]
         
@@ -84,11 +69,7 @@ class FilmPairDataset(Dataset):
 
 
 def create_evaluation_pairs_for_dimension(dataset, dimension):
-    """
-    Create positive and negative pairs for evaluating a specific dimension.
-    
-    Returns list of InputExample objects suitable for sentence-transformers evaluation.
-    """
+
     eval_examples = []
     texts = dataset.texts
     
